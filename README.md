@@ -78,8 +78,8 @@ Windows/Linux (capture)                  Android/anything (playback)
 ┌────────────────────────┐              ┌──────────────────────┐
 │ system-audio loopback   │──TCP/WiFi──▶│ v0: mpv plays raw    │
 │ → S16LE PCM + header    │  raw PCM    │     PCM stream       │
-│ v1: +capture timestamps │              │ v1: PTS-scheduled    │
-└────────────────────────┘              │     jitter buffer    │
+│ v1: +capture timestamps │              │ v1: timestamp-       │
+└────────────────────────┘              │  anchored controller │
                                         └──────────────────────┘
 ```
 
@@ -94,5 +94,5 @@ Wire protocol: `docs/WIRE-FORMAT.md`. **The protocol is the product** — any ca
 ## Roadmap
 
 - **v0 — dumb pipe** (shipped): capture → TCP → play. Sync via player offset; drifts ~seconds on restart (measured). Still served to header-less clients as the legacy fallback.
-- **v1 — timestamps** (shipped 2026-07-20): framed packets + clock-sync handshake; receiver holds capture-to-ear latency at a chosen constant (±2.4 ms across restarts, measured locally). Spec: `docs/WIRE-FORMAT.md`. Multi-client server: phone + tablet + tests simultaneously.
-- **v2 — polish:** auto-reconnect, macOS shim, periodic re-handshake if multi-hour drift ever bites in practice, maybe Opus for weak links, maybe a real Android app if Termux friction annoys.
+- **v1.1 — timestamps** (shipped 2026-07-20): framed packets + clock-sync handshake; prime-once + depth-steering controller. Honest claim per review: **restart-stable sync in the tested configurations** (real-device bench: 3× restart, no re-tune) — NOT a general fixed-latency guarantee; stall/disturbance recovery is coded with guards but awaits deterministic verification. (A ±2.4 ms figure previously cited here belonged to the rejected v1.0 controller.) Spec: `docs/WIRE-FORMAT.md`.
+- **v2 — hardening:** per-client bounded send queues (capture must never wait on TCP), deterministic virtual-time controller tests, heartbeat vs pause-timeout churn, macOS shim, slow target re-anchor for DAC drift, maybe Opus for weak links, maybe a real Android app. (Receiver auto-reconnect already shipped in the launcher.)

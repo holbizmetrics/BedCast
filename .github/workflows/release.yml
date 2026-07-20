@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   build-windows-server:
+    needs: build-check   # release must not publish if validation fails (Sol xhigh)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
