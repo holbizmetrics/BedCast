@@ -6,9 +6,10 @@
 # Setup once (Termux):  pkg install python mpv netcat-openbsd coreutils
 #   (some Termux repos name the mpv package "mpv-x")
 #
-# Prefers the v1 timestamped receiver (bedcast_receive.py — restart-invariant
-# latency, needs python). Falls back to the v0 dumb pipe (nc | mpv) without
-# python; the server auto-detects which one connected.
+# Default: the PROVEN v0 pipe (nc | mpv). The v1 timestamped receiver is
+# opt-in via BEDCAST_V1=1 — its control loop was field-tested 2026-07-20 and
+# found UNSTABLE on real sinks (fill/drop oscillation -> audible chop);
+# redesign queued (buffer-depth control). Re-flip the default only after that.
 #
 # Auto-reconnect: if the server drops (restart, WiFi blip), the receiver
 # waits for the port to come back and resumes by itself. Ctrl-C exits.
@@ -32,11 +33,11 @@ while :; do
     sleep 2
   done
 
-  if command -v python >/dev/null && [ -f "$HERE/bedcast_receive.py" ]; then
+  if [ "${BEDCAST_V1:-0}" = "1" ] && command -v python >/dev/null && [ -f "$HERE/bedcast_receive.py" ]; then
     echo "[bedcast] v1 receiver (timestamped), target latency ${BUFFER_MS}ms — Ctrl-C to stop"
     python "$HERE/bedcast_receive.py" "$PC_IP" --port "$PORT" --buffer-ms "$BUFFER_MS" || true
   else
-    echo "[bedcast] v0 legacy receiver (no python found; sync drifts on restarts) — Ctrl-C to stop"
+    echo "[bedcast] v0 receiver (stable default; sync drifts on restarts) — Ctrl-C to stop"
     # -d: don't read our stdin — without it, OpenBSD nc never exits on server EOF
     # (receiver hangs silent after a server stop/restart; found in review 2026-07-20)
     nc -d "$PC_IP" "$PORT" \

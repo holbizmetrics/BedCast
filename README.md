@@ -18,7 +18,7 @@ Low-latency streamers (built for calls/gaming) *must* run small buffers, so ever
 | Server | Linux | `server-linux.sh` — **UNTESTED** (syntax-checked; PulseAudio/PipeWire monitor-source approach is standard). Reports welcome. |
 | Server | macOS | **NOT BUILT** — CoreAudio has no native loopback; needs [BlackHole](https://github.com/ExistentialAudio/BlackHole) + a pipe shim, or a Swift audio-tap (macOS 14.2+). Contributor with a Mac wanted. |
 | Receiver v0 (`nc \| mpv`) | Android (Termux) | **TESTED** live 2026-07-20 |
-| Receiver v1 (`bedcast_receive.py`, timestamped) | any python + mpv | **TESTED** locally 2026-07-20: latency converges to target ±2.4 ms across restarts (v0: ±seconds). Live phone test pending. |
+| Receiver v1 (`bedcast_receive.py`, timestamped) | any python + mpv | **CONFIRMED UNSTABLE on real sinks** (2026-07-20 field + local repro): control loop oscillates (fill/drop storms → audible chop). The ±2.4 ms result held only against an idealized null sink — verified-on-proxy, failed-on-substrate. Opt-in via `BEDCAST_V1=1`; redesign queued (buffer-depth control, NetEQ-style). |
 | Server v1 protocol (handshake, framing, multi-client, v0 fallback) | Windows | **TESTED** locally 2026-07-20 — v1 + legacy v0 clients simultaneously |
 | v0 stress behavior (pause/seek/reconnect) | — | **CONFIRMED WEAK** (2026-07-20, live): receiver restart → ~2.5 s sync shift, needs re-tune. This is the failure v1 fixes — see the v1 receiver row. |
 
