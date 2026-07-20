@@ -1,38 +1,97 @@
 # BedCast
 
-**Stream Windows system audio to an Android device over WiFi — so you can watch a movie on the PC screen and hear it on the phone in bed. No Bluetooth.**
+**Stream your computer's audio to an Android phone (or any device) over WiFi — watch a movie on the PC screen, hear it on the phone in bed. No Bluetooth.**
 
-## The design principle (why this beats Bluetooth structurally)
+Born from one evening's actual problem: wanting to watch a movie from bed without Bluetooth. The existing apps worked but stuttered; this doesn't, because it makes one deliberate trade they can't.
 
-The stream is one-way and non-interactive, so **latency costs nothing — only jitter and lip-sync drift cost anything.** That inversion buys stability with buffer, for free: half a second of buffer is intolerable in a call, invisible here, because the video player compensates once (`mpv`: `+`/`-`, VLC: `j`/`k`).
+## The design principle
 
-The failure mode of naive streamers: sync depends on *queue depth*, which pause/seek/WiFi hiccups scramble → re-tune every time. BedCast's fix (v1): **stamp every packet with a capture timestamp, sync clocks once, play each packet at `timestamp + offset`** — never "when it arrives." Buffer depth stops mattering; sync self-corrects across pause, seek, and dropouts. (Same idea as PTS in video containers / RTP sender reports.)
+The stream is one-way and non-interactive, so **latency costs nothing — only jitter and lip-sync drift cost anything.** That inversion buys stability with buffer, for free: half a second of buffer would be intolerable in a game headset, and is invisible here, because the video player compensates once (VLC: `j`/`k`, mpv: `+`/`-`).
 
-## Non-goals
+Low-latency streamers (built for calls/gaming) *must* run small buffers, so every WiFi hiccup pokes through as a stutter. BedCast runs a fat buffer instead — WiFi jitter disappears into it. In our first side-by-side evening (one listener, one network — n=1, not a benchmark), that difference was clearly audible.
 
-- **No compression.** 48 kHz × 16-bit × stereo ≈ 1.5 Mbps; home WiFi has tens of Mbps. Raw PCM. (If a weak link ever forces it: Opus, nothing else.)
-- **No video.** The PC screen is the display. For phone-as-display, use Sunshine/Moonlight instead.
-- **No Android APK (yet).** The receiver runs in Termux (mpv/pacat) — kills the entire app-build pipeline until the design is proven.
+## Status — honest labels
+
+| Piece | Platform | State |
+|-------|----------|-------|
+| Server (capture+send) | Windows | **TESTED** — byte-exact rate + live listening session, 2026-07-20 |
+| Server | Linux | `server-linux.sh` — **UNTESTED** (syntax-checked; PulseAudio/PipeWire monitor-source approach is standard). Reports welcome. |
+| Server | macOS | **NOT BUILT** — CoreAudio has no native loopback; needs [BlackHole](https://github.com/ExistentialAudio/BlackHole) + a pipe shim, or a Swift audio-tap (macOS 14.2+). Contributor with a Mac wanted. |
+| Receiver | Android (Termux) | **TESTED** live 2026-07-20 |
+| Receiver | Linux / macOS / Windows | any `mpv` + netcat works (see below) — untested but it's the same three commands |
+| v0 stress behavior (pause/seek/reconnect) | — | **CONFIRMED WEAK** (2026-07-20, live): receiver restart → sync off, needs re-tune; startup delayed by cache fill. Exactly the failure v1's timestamps fix. |
+
+**Trust model: your LAN.** No auth, no encryption — anyone who can reach the port hears your system audio. Don't port-forward it. (See `docs/WIRE-FORMAT.md`.)
+
+## Quick start
+
+### Windows server
+
+Grab `bedcast-server.exe` from [Releases](../../releases) (no .NET install needed), or build from source (`dotnet build src/BedCast.Server -c Release`).
+
+> **SmartScreen note:** the exe is unsigned, so Windows may show "Windows protected your PC" on first run — click *More info → Run anyway*, or build from source if you'd rather not trust a downloaded binary.
+
+```
+bedcast-server.exe                      # captures default output device, serves :48100
+bedcast-server.exe --list-devices       # see your output devices
+bedcast-server.exe --device "CABLE"     # capture a specific device (substring match)
+bedcast-server.exe --smoke-test 5 t.raw # prove capture works, no network needed
+```
+
+### Linux server
+
+```bash
+./server-linux.sh                       # streams the default sink's monitor on :48100
+```
+
+### Android receiver (Termux, no app install)
+
+```bash
+pkg install git mpv netcat-openbsd
+git clone https://github.com/holbizmetrics/BedCast
+BedCast/receiver/bedcast-receive.sh YOUR_PC_IP
+```
+
+### Any other receiver (Linux/macOS/Windows with mpv)
+
+```bash
+nc YOUR_PC_IP 48100 | tail -c +17 | mpv --demuxer=rawaudio \
+  --demuxer-rawaudio-rate=48000 --demuxer-rawaudio-channels=2 \
+  --demuxer-rawaudio-format=s16le -
+```
+
+(The `tail -c +17` strips the 16-byte header — or read `docs/WIRE-FORMAT.md` and parse it properly.)
+
+### Then: sync once
+
+Play your movie, nudge the player's audio offset until lips match (VLC: `j`/`k`, mpv: `+`/`-`). Done — that's the buffer trade paying out.
+
+## Silent-PC mode (sound *only* on the phone)
+
+Loopback-capturing your speakers means the room hears the movie too. If you want true silence: route Windows' default output to a virtual device ([VB-Audio Cable](https://vb-audio.com/Cable/), free) and capture that: `--device "CABLE Input"`. The speakers get nothing; the phone gets everything.
 
 ## Architecture
 
 ```
-Windows (C# / NAudio)                    Android (Termux)
+Windows/Linux (capture)                  Android/anything (playback)
 ┌────────────────────────┐              ┌──────────────────────┐
-│ WASAPI loopback capture │──TCP/WiFi──▶│ v0: mpv/pacat plays  │
-│ float32 → S16LE PCM     │  raw PCM    │     raw PCM stream   │
+│ system-audio loopback   │──TCP/WiFi──▶│ v0: mpv plays raw    │
+│ → S16LE PCM + header    │  raw PCM    │     PCM stream       │
 │ v1: +capture timestamps │              │ v1: PTS-scheduled    │
 └────────────────────────┘              │     jitter buffer    │
                                         └──────────────────────┘
 ```
 
+Wire protocol: `docs/WIRE-FORMAT.md`. **The protocol is the product** — any capture shim that speaks it works with any receiver. New platform = new shim, nothing else changes.
+
+## Non-goals
+
+- **No compression.** 48 kHz × 16-bit × stereo ≈ 1.5 Mbps; home WiFi has tens of Mbps. Raw PCM, zero codec artifacts, receiver stays a one-liner. (If a weak link ever forces it: Opus, nothing else.)
+- **No video.** The PC screen is the display. For phone-as-display, use Sunshine/Moonlight instead.
+- **No Android APK (yet).** Termux + mpv kills the entire app-build pipeline until the design is proven.
+
 ## Roadmap
 
-- **v0 — dumb pipe (prove transport):** capture → TCP → play. Sync via player offset, manually tuned. Expected to break on pause/seek (that's the point — it reproduces the problem v1 solves).
-- **v1 — timestamps:** packet framing (`seq`, `capture_ts`, `n_samples`), one-shot clock sync handshake, receiver schedules playback at `capture_ts + offset`.
-- **v2 — polish:** auto-reconnect, silence suppression, maybe Opus for weak links, maybe a real Android app if Termux friction annoys.
-
-## Status
-
-- v0 server: building (2026-07-20)
-- Probe result that motivated this: AudioRelay works for basic playback (verified 2026-07-20, Star Trek Enterprise E01); pause/seek/lock stress verdict pending.
+- **v0 — dumb pipe** (this): capture → TCP → play. Sync via player offset. Expected to need re-tuning after pause/seek — that's the known weakness, deliberately shipped first.
+- **v1 — timestamps:** framed packets (`seq`, `capture_ts`), one-shot clock sync, receiver plays at `capture_ts + offset`. Sync becomes independent of buffer depth: survives pause, seek, dropouts. Spec sketch in `docs/WIRE-FORMAT.md`.
+- **v2 — polish:** auto-reconnect, macOS shim, maybe Opus for weak links, maybe a real Android app if Termux friction annoys.

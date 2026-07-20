@@ -1,0 +1,57 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-server:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Publish self-contained win-x64 exe
+        run: >
+          dotnet publish src/BedCast.Server/BedCast.Server.csproj
+          -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -o publish
+
+      - name: Assemble release zip
+        shell: bash
+        run: |
+          mkdir -p stage/BedCast
+          cp publish/bedcast-server.exe stage/BedCast/
+          cp -r receiver stage/BedCast/
+          cp server-linux.sh stage/BedCast/
+          cp README.md stage/BedCast/
+          cp -r docs stage/BedCast/
+          cd stage && 7z a ../BedCast-${GITHUB_REF_NAME}-win-x64.zip BedCast
+
+      - name: Create GitHub release with artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            BedCast-*.zip
+            publish/bedcast-server.exe
+          generate_release_notes: true
+
+  build-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Build must succeed warning-free
+        run: dotnet build src/BedCast.Server/BedCast.Server.csproj -c Release -warnaserror
+      - name: Linux script syntax check
+        shell: bash
+        run: bash -n server-linux.sh && bash -n receiver/bedcast-receive.sh

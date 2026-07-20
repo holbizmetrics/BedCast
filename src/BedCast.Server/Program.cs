@@ -29,15 +29,27 @@ internal static class Program
     {
         if (args.Contains("--help") || args.Contains("-h"))
         {
-            Console.WriteLine("bedcast-server [--port N] [--smoke-test SECONDS OUT.raw]");
+            Console.WriteLine("bedcast-server [--port N] [--device NAME_SUBSTRING] [--list-devices] [--smoke-test SECONDS OUT.raw]");
+            return 0;
+        }
+
+        using var enumerator = new MMDeviceEnumerator();
+
+        if (args.Contains("--list-devices"))
+        {
+            foreach (var d in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+                Console.WriteLine($"  {d.FriendlyName}");
             return 0;
         }
 
         int port = ArgValue(args, "--port") is { } p ? int.Parse(p) : Port;
 
-        // Capture the default render device (what the speakers are playing).
-        using var device = new MMDeviceEnumerator()
-            .GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+        // Capture the chosen render device — default, or first active one matching --device substring.
+        using var device = ArgValue(args, "--device") is { } wanted
+            ? enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
+                  .FirstOrDefault(d => d.FriendlyName.Contains(wanted, StringComparison.OrdinalIgnoreCase))
+              ?? throw new ArgumentException($"no active render device matches '{wanted}' (try --list-devices)")
+            : enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
         using var capture = new WasapiLoopbackCapture(device);
 
         var src = capture.WaveFormat; // typically IEEE float 32, mix rate/channels

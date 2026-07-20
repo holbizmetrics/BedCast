@@ -3,8 +3,8 @@
 #
 # Usage:  ./bedcast-receive.sh PC_IP [BUFFER_MS]
 #
-# Setup once:  pkg install mpv-x netcat-openbsd coreutils
-#   (mpv package name may be plain "mpv" depending on repo)
+# Setup once:  pkg install mpv netcat-openbsd coreutils
+#   (some Termux repos name the package "mpv-x")
 #
 # The 16-byte BEDCAST0 header is stripped (tail -c +17); the rest is
 # endless S16LE 48kHz stereo PCM, played by mpv with a jitter buffer.
