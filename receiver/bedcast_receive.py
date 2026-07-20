@@ -131,7 +131,7 @@ def main() -> int:
 
     b_us = args.buffer_ms * 1000
     sock = socket.create_connection((args.host, args.port), timeout=5)
-    sock.settimeout(10)
+    sock.settimeout(30)
     try:
         offset = handshake(sock)
         header = read_exactly(sock, 16)
@@ -205,6 +205,8 @@ def main() -> int:
             if ln > 1_048_576:
                 raise ConnectionError("insane frame length %d" % ln)
             payload = read_exactly(sock, ln)
+            if ln == 0:
+                continue  # heartbeat: connection alive during render-silence (pause)
             pkts += 1
             if t_last_pkt is not None and time.monotonic() - t_last_pkt > GAP_REPRIME_S:
                 # silence-type gap (pause/no-render): nothing was stale, but elapsed

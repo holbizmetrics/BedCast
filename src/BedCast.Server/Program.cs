@@ -78,6 +78,20 @@ internal static class Program
         };
         capture.StartRecording();
 
+        // Heartbeat timer (Eve F-v1-5 / Sol xhigh pause-churn): WASAPI loopback can
+        // go silent while nothing renders; without traffic the receiver's socket
+        // timeout kills the connection every >10s pause. A len=0 v1 frame every 2s
+        // of send-silence keeps the connection provably alive; v0 (raw pipe) has no
+        // framing, so v0 clients keep the old behavior.
+        var heartbeat = new System.Threading.Timer(_ =>
+        {
+            lock (clients)
+            {
+                foreach (var c in clients) c.SendHeartbeatIfQuiet(NowUs());
+                clients.RemoveAll(c => c.Failed);
+            }
+        }, null, 2000, 2000);
+
         var listener = new TcpListener(IPAddress.Any, port);
         listener.Start();
         Console.WriteLine($"[bedcast] listening on 0.0.0.0:{port} (protocols: BEDCAST1 + legacy BEDCAST0, multi-client)");
@@ -140,25 +154,51 @@ internal static class Program
     private sealed class ClientConn(NetworkStream net, bool v1)
     {
         private uint _seq;
+        private long _lastSendUs;
+        private readonly object _writeLock = new();
         public volatile bool Failed;
+
+        /// <summary>len=0 keepalive frame if nothing was sent for >2.5s (v1 only).</summary>
+        public void SendHeartbeatIfQuiet(long nowUs)
+        {
+            if (Failed || !v1 || nowUs - _lastSendUs < 2_500_000) return;
+            try
+            {
+                var frame = new byte[16];
+                lock (_writeLock)
+                {
+                    BitConverter.GetBytes(_seq++).CopyTo(frame, 0);
+                    BitConverter.GetBytes(nowUs).CopyTo(frame, 4);
+                    BitConverter.GetBytes(0u).CopyTo(frame, 12);
+                    net.Write(frame, 0, frame.Length);
+                    _lastSendUs = nowUs;
+                }
+            }
+            catch (IOException) { Failed = true; }
+            catch (ObjectDisposedException) { Failed = true; }
+        }
 
         public void Send(byte[] pcm, long ts)
         {
             if (Failed) return;
             try
             {
-                if (v1)
+                lock (_writeLock)
                 {
-                    var frame = new byte[16 + pcm.Length];
-                    BitConverter.GetBytes(_seq++).CopyTo(frame, 0);
-                    BitConverter.GetBytes(ts).CopyTo(frame, 4);
-                    BitConverter.GetBytes((uint)pcm.Length).CopyTo(frame, 12);
-                    pcm.CopyTo(frame, 16);
-                    net.Write(frame, 0, frame.Length);
-                }
-                else
-                {
-                    net.Write(pcm, 0, pcm.Length);
+                    if (v1)
+                    {
+                        var frame = new byte[16 + pcm.Length];
+                        BitConverter.GetBytes(_seq++).CopyTo(frame, 0);
+                        BitConverter.GetBytes(ts).CopyTo(frame, 4);
+                        BitConverter.GetBytes((uint)pcm.Length).CopyTo(frame, 12);
+                        pcm.CopyTo(frame, 16);
+                        net.Write(frame, 0, frame.Length);
+                    }
+                    else
+                    {
+                        net.Write(pcm, 0, pcm.Length);
+                    }
+                    _lastSendUs = ts;
                 }
             }
             catch (IOException) { Failed = true; }
