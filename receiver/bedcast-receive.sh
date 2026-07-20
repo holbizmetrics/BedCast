@@ -21,7 +21,9 @@ command -v mpv >/dev/null || { echo "missing: pkg install mpv (or mpv-x)"; exit 
 
 echo "[bedcast] connecting to $PC_IP:$PORT (buffer ${BUFFER_MS}ms) — Ctrl-C to stop"
 
-nc "$PC_IP" "$PORT" \
+# -d: don't read our stdin — without it, OpenBSD nc never exits on server EOF
+# (receiver hangs silent after a server stop/restart; found in review 2026-07-20)
+nc -d "$PC_IP" "$PORT" \
   | tail -c +17 \
   | mpv --no-terminal --force-seekable=no \
         --demuxer=rawaudio \

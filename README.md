@@ -55,7 +55,7 @@ BedCast/receiver/bedcast-receive.sh YOUR_PC_IP
 ### Any other receiver (Linux/macOS/Windows with mpv)
 
 ```bash
-nc YOUR_PC_IP 48100 | tail -c +17 | mpv --demuxer=rawaudio \
+nc -d YOUR_PC_IP 48100 | tail -c +17 | mpv --demuxer=rawaudio \
   --demuxer-rawaudio-rate=48000 --demuxer-rawaudio-channels=2 \
   --demuxer-rawaudio-format=s16le -
 ```
