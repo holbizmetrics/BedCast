@@ -6,7 +6,7 @@ Born from one evening's actual problem: wanting to watch a movie from bed withou
 
 ## The design principle
 
-The stream is one-way and non-interactive, so **latency costs nothing — only jitter and lip-sync drift cost anything.** That inversion buys stability with buffer, for free: half a second of buffer would be intolerable in a game headset, and is invisible here, because the video player compensates once (VLC: `j`/`k`, mpv: `+`/`-`).
+The stream is one-way and non-interactive, so **latency costs nothing — only jitter and lip-sync drift cost anything.** That inversion buys stability with buffer, for free: half a second of buffer would be intolerable in a game headset, and is invisible here, because the video player compensates once (VLC: `j`/`k` at 50 ms per press; mpv: `Ctrl`+`+`/`Ctrl`+`-` at 100 ms).
 
 Low-latency streamers (built for calls/gaming) *must* run small buffers, so every WiFi hiccup pokes through as a stutter. BedCast runs a fat buffer instead — WiFi jitter disappears into it. In our first side-by-side evening (one listener, one network — n=1, not a benchmark), that difference was clearly audible.
 
@@ -65,7 +65,7 @@ nc -d YOUR_PC_IP 48100 | tail -c +17 | mpv --demuxer=rawaudio \
 
 ### Then: sync once
 
-Play your movie, nudge the player's audio offset until lips match (VLC: `j`/`k`, mpv: `+`/`-`). Done — that's the buffer trade paying out.
+Play your movie, nudge the player's audio offset until lips match (VLC: `j`/`k` at 50 ms per press; mpv: `Ctrl`+`+`/`Ctrl`+`-` at 100 ms). Done — that's the buffer trade paying out.
 
 ## Silent-PC mode (sound *only* on the phone)
 

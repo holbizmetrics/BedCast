@@ -112,6 +112,12 @@ internal static class Program
                 var conn = new ClientConn(net, v1);
                 lock (clients) clients.Add(conn);
 
+                // Ghost-client window (Eve review 2026-07-20, F4): a client that vanishes
+                // without RST (phone WiFi sleep) fails neither this poll nor the write path
+                // promptly — the OS retransmits into the send buffer for minutes before an
+                // IOException surfaces. Multi-client now means a ghost no longer BLOCKS other
+                // receivers (F3 fix); it just lingers in the list until TCP gives up.
+                // Acceptable under the stated LAN trust model.
                 var sock = client.Client;
                 while (!conn.Failed)
                 {
