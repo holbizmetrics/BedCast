@@ -15,7 +15,7 @@ namespace BedCast.Server;
 ///   server   → "BC1R" + t0_us + t_server_us   echo per ping
 ///   receiver → "BC1G" + 0(u64)                go
 ///   server   → 16-byte header (magic BEDCAST1) then framed packets:
-///              seq(u32) | capture_ts_us(u64, unix epoch) | len(u32) | S16LE payload
+///              seq(u32) | capture_ts_us(i64, unix epoch) | len(u32) | S16LE payload
 ///
 /// v0 (BEDCAST0, legacy dumb pipe — receiver sends nothing within 700 ms):
 ///   server   → 16-byte header (magic BEDCAST0) then endless raw S16LE.
@@ -86,6 +86,11 @@ internal static class Program
         {
             var client = listener.AcceptTcpClient();
             client.NoDelay = true;
+            // F-v1-4 (Eve v1 review): bound blocking sends. A ghost whose TCP send
+            // buffer fills (WiFi-sleep) would otherwise block the broadcast lock -
+            // and the WASAPI callback - for ALL clients until retransmit gives up.
+            // With a 2s cap the write throws, Failed is set, the ghost is culled.
+            client.Client.SendTimeout = 2000;
             new Thread(() => HandleClient(client, clients, src)) { IsBackground = true }.Start();
         }
     }

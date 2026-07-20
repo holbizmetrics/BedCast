@@ -136,10 +136,42 @@ def main() -> int:
     sink = Sink(args.sink, rate, ch)
     bytes_per_us = rate * ch * 2 / 1_000_000
 
-    fills = drops = pkts = 0
-    err_min = err_max = err_sum = err_n = 0
+    fills = drops = pkts = corrections = 0
+    dep_min = dep_max = dep_sum = dep_n = 0
     t_end = time.monotonic() + args.duration if args.duration else None
     t_stats = time.monotonic() + args.stats_secs
+
+    # v1.1 control (redesign 2026-07-20, converged from three independent analyses:
+    # builder repro, termux field forensics, Eve skew rig): ANCHOR ONCE by clock,
+    # then STEER by queue depth. The old per-packet wall-clock steering measured
+    # pipe backpressure, not latency, and oscillated (fills~=drops storms).
+    #   prime: first packet -> transit = now - (ts - offset); write (B - transit)
+    #          of silence so capture-to-ear starts at B (restart-invariant, skew-safe).
+    #   steer: depth_us = written_us - (now - t_first_write)  [sink consumes realtime]
+    #          correct ONLY on sustained excursion outside a wide deadband,
+    #          rate-limited, sized to return depth to B. No per-packet judgment.
+    DEADBAND_US = 80_000
+    SUSTAIN_PKTS = 40          # ~0.4s of consecutive out-of-band packets
+    CORRECTION_GAP_S = 2.0     # min seconds between corrections
+    written_us = 0.0
+    t_first_write = None       # monotonic seconds of first sink write
+    sustain = 0
+    t_last_corr = 0.0
+    primed = False
+
+    def sink_write(data: bytes):
+        nonlocal written_us, t_first_write
+        if not data:
+            return
+        if t_first_write is None:
+            t_first_write = time.monotonic()
+        sink.write(data)
+        written_us += len(data) / bytes_per_us
+
+    def silence(us: float) -> bytes:
+        frame_bytes = ch * 2
+        n = int(us * bytes_per_us) // frame_bytes * frame_bytes
+        return b"\x00" * max(0, n)
 
     try:
         while t_end is None or time.monotonic() < t_end:
@@ -150,35 +182,57 @@ def main() -> int:
             payload = read_exactly(sock, ln)
             pkts += 1
 
-            # Server ts -> local clock is ts MINUS offset (server ~= local + offset).
-            # Sign error here costs 2x the clock skew: found in cross-operator review
-            # 2026-07-20 (skew -1s: every packet dropped, silent; +1s: stealth B+2s
-            # latency while stats claimed convergence). Same-machine tests can't see it.
-            err = now_us() - (ts - offset + b_us)  # + late / - early
-            err_n += 1
-            err_sum += err
-            err_min = min(err_min, err) if err_n > 1 else err
-            err_max = max(err_max, err) if err_n > 1 else err
+            if not primed:
+                # Server ts -> local clock is ts MINUS offset (server ~= local + offset).
+                # Sign error costs 2x skew (cross-operator review 2026-07-20) - the fix
+                # lives on in the anchor: transit uses (ts - offset).
+                transit_us = now_us() - (ts - offset)
+                prime_us = min(max(b_us - transit_us, 0), b_us)
+                sink_write(silence(prime_us))
+                sink_write(payload)
+                primed = True
+                print("[bedcast] primed: transit %.1fms, prime %.1fms -> depth target %dms"
+                      % (transit_us / 1000, prime_us / 1000, args.buffer_ms), file=sys.stderr)
+                continue
 
-            # Stats BEFORE drop/fill: the all-drop failure mode must stay visible
-            # (previously `continue` skipped this — a fully-dropping receiver was mute).
+            depth_us = written_us - (time.monotonic() - t_first_write) * 1e6
+            dep_n += 1
+            dep_sum += depth_us
+            dep_min = min(dep_min, depth_us) if dep_n > 1 else depth_us
+            dep_max = max(dep_max, depth_us) if dep_n > 1 else depth_us
+
+            # Stats BEFORE any control action: all-drop mode must stay visible
+            # (review F-v1-2: a fully-dropping receiver was mute).
             if time.monotonic() >= t_stats:
-                print("[stats] pkts=%d err(ms) avg=%.1f min=%.1f max=%.1f fills=%d drops=%d"
-                      % (pkts, err_sum / err_n / 1000, err_min / 1000, err_max / 1000, fills, drops),
-                      file=sys.stderr)
-                err_min = err_max = err_sum = err_n = 0
+                print("[stats] pkts=%d depth(ms) avg=%.1f min=%.1f max=%.1f fills=%d drops=%d corr=%d"
+                      % (pkts, dep_sum / dep_n / 1000, dep_min / 1000, dep_max / 1000,
+                         fills, drops, corrections), file=sys.stderr)
+                dep_min = dep_max = dep_sum = dep_n = 0
                 t_stats = time.monotonic() + args.stats_secs
 
-            if err > LATE_DROP_US:
-                drops += 1
-                continue
-            if err < -EARLY_FILL_US:
-                fill_us = min(-err - EARLY_FILL_US // 2, MAX_FILL_US)
-                frame_bytes = ch * 2  # align to real frame size, not hardcoded stereo
-                n_bytes = int(fill_us * bytes_per_us) // frame_bytes * frame_bytes
-                sink.write(b"\x00" * n_bytes)
-                fills += 1
-            sink.write(payload)
+            excursion = depth_us - b_us
+            if abs(excursion) > DEADBAND_US:
+                sustain += 1
+            else:
+                sustain = 0
+
+            if sustain >= SUSTAIN_PKTS and time.monotonic() - t_last_corr > CORRECTION_GAP_S:
+                if excursion < 0:
+                    # sustained underrun risk: refill to target
+                    sink_write(silence(-excursion))
+                    fills += 1
+                else:
+                    # sustained backlog: drop this payload (and keep dropping while high)
+                    drops += 1
+                    corrections += 1
+                    t_last_corr = time.monotonic()
+                    sustain = 0
+                    continue
+                corrections += 1
+                t_last_corr = time.monotonic()
+                sustain = 0
+
+            sink_write(payload)
     except (ConnectionError, socket.timeout) as e:
         print("[bedcast] stream ended: %s" % e, file=sys.stderr)
     finally:
