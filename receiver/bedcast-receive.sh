@@ -36,7 +36,13 @@ while :; do
 
   if [ "${BEDCAST_V0:-0}" != "1" ] && command -v python >/dev/null && [ -f "$HERE/bedcast_receive.py" ]; then
     echo "[bedcast] v1 receiver (timestamped), target latency ${BUFFER_MS}ms — Ctrl-C to stop"
-    python "$HERE/bedcast_receive.py" "$PC_IP" --port "$PORT" --buffer-ms "$BUFFER_MS" || true
+    python "$HERE/bedcast_receive.py" "$PC_IP" --port "$PORT" --buffer-ms "$BUFFER_MS" && rc=0 || rc=$?
+    if [ "${rc:-0}" = "3" ]; then
+      # exit 3 = server is v0-only (e.g. server-linux.sh): fall back for this session
+      # (cross-family review 2026-07-20 - the old behavior reconnect-looped forever)
+      echo "[bedcast] server supports only v0 — falling back to the v0 pipe"
+      BEDCAST_V0=1
+    fi
   else
     echo "[bedcast] v0 receiver (stable default; sync drifts on restarts) — Ctrl-C to stop"
     # -d: don't read our stdin — without it, OpenBSD nc never exits on server EOF

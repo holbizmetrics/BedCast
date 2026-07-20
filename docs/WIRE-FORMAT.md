@@ -53,7 +53,13 @@ simultaneously.
 | echo | server → receiver | `"BC1R"` + `t0_us` echoed + `t_server_us` (i64) |
 | go | receiver → server | `"BC1G"` + `0` (i64) |
 
-Receiver keeps the minimum-RTT sample: `offset = t_server − (t0 + t1)/2`.
+Receiver keeps the minimum-RTT sample: `offset = t_server − (t0 + t1)/2`, so
+`server_clock ≈ local_clock + offset` and a server timestamp converts to local time
+as **`ts − offset`** (the sign matters: the + form costs 2× the skew — caught by
+cross-operator review after shipping, invisible in same-machine tests).
+
+Normative counts: a receiver SHOULD send at most 8 pings (the reference sends 5);
+a server MUST tolerate at least 8 before `BC1G`.
 
 **Stream:** 16-byte header (magic `BEDCAST1`, same layout as v0), then framed packets:
 
@@ -64,11 +70,31 @@ Receiver keeps the minimum-RTT sample: `offset = t_server − (t0 + t1)/2`.
 | `len` | u32 | payload bytes (sanity cap 1 MiB) |
 | payload | `len` | S16LE PCM |
 
-**Receiver policy** (the point of all this): playback error `e = now − (ts + offset + B)`
-where `B` is the chosen target latency (default 300 ms). `e < −20 ms` → write silence
-to converge down to `B`; `e > +120 ms` → drop the packet to catch up. Capture-to-ear
-latency therefore returns to `B` after any restart, stall, or seek — measured locally
-at ±2.4 ms across receiver restarts (2026-07-20; v0's equivalent was ±seconds).
+**Receiver policy — v1.1 "prime once, steer by depth"** (replaced the v1.0 per-packet
+wall-clock law, which measured pipe backpressure rather than latency and oscillated
+into audible fill/drop storms on real sinks; three independent analyses converged on
+this redesign 2026-07-20):
+
+1. **Prime:** on the first packet, `transit = now − (ts − offset)`; write
+   `max(B − transit, 0)` of silence. This anchors pipeline latency at the chosen
+   target `B` (default 300 ms), skew-safe, identically on every (re)connect.
+2. **Steer:** estimated queue depth `= written_us − elapsed_us` (the sink consumes
+   in real time once playing). Steering targets the **post-prime depth** (= `B −
+   transit`), not `B` itself. Corrections require a sustained excursion (~0.4 s)
+   outside an 80 ms deadband and are rate-limited per episode.
+3. **Guards:** a silence-fill that fails to raise measured depth means the sink is
+   saturated below target — fills disable with a warning rather than looping
+   (a metric must be able to observe its own action's failure). A high backlog
+   drains in one episode (consecutive drops, bounded to 2 s of discontinuity),
+   not one packet per rate-limit window.
+
+**Honest wording** (per cross-family review): the depth estimate measures bytes
+handed to the sink, not acoustic capture-to-ear latency — sink and device buffers
+sit outside it as a constant the user tunes away once. The tested claim is
+**restart-stable sync in the tested configurations** (real phone/PC WiFi bench:
+3× restart, no re-tune needed; by-ear residual sub-0.3 s), not a fixed acoustic
+latency guarantee. A server that only speaks v0 (e.g. `server-linux.sh`) causes a
+v1 receiver to exit with code 3; the reference launcher falls back to the v0 pipe.
 
 Clock drift bound: consumer crystals drift ≤50 ppm → ≤180 ms over a 2 h movie worst
 case, absorbed continuously by the fill/drop band. Multi-hour sessions may accumulate

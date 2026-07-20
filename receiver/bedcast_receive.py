@@ -45,7 +45,7 @@ def handshake(sock: socket.socket, rounds: int = 5) -> int:
         t1 = now_us()
         tag, t0_echo, t_server = reply[:4], *struct.unpack("<qq", reply[4:])
         if tag != b"BC1R" or t0_echo != t0:
-            raise ConnectionError("bad handshake reply")
+            raise ProtocolMismatch("bad handshake reply (v0 header/PCM instead of BC1R?)")
         rtt = t1 - t0
         offset = t_server - (t0 + t1) // 2
         if best is None or rtt < best[0]:
@@ -63,6 +63,10 @@ def read_exactly(sock: socket.socket, n: int) -> bytes:
             raise ConnectionError("server closed")
         buf += chunk
     return buf
+
+
+class ProtocolMismatch(ConnectionError):
+    pass
 
 
 class Sink:
@@ -99,6 +103,11 @@ class Sink:
                 self.t_start = now_us()
             self.consumed_us += len(data) / self.bytes_per_us
             ahead_us = (self.t_start + self.consumed_us) - now_us()
+            if ahead_us < 0:
+                # underrun: a real device idles - it does not bank catch-up credit
+                # (unbounded credit made post-stall depth readings unphysical)
+                self.t_start = now_us() - self.consumed_us
+                ahead_us = 0
             if ahead_us > 100_000:  # keep only 100ms device-buffer illusion
                 time.sleep((ahead_us - 100_000) / 1e6)
 
@@ -123,11 +132,19 @@ def main() -> int:
     b_us = args.buffer_ms * 1000
     sock = socket.create_connection((args.host, args.port), timeout=5)
     sock.settimeout(10)
-    offset = handshake(sock)
-
-    header = read_exactly(sock, 16)
-    if header[:8] != MAGIC_V1:
-        raise ConnectionError("not a BEDCAST1 server (got %r)" % header[:8])
+    try:
+        offset = handshake(sock)
+        header = read_exactly(sock, 16)
+        if header[:8] != MAGIC_V1:
+            raise ProtocolMismatch("not a BEDCAST1 server (got %r)" % header[:8])
+    except ProtocolMismatch as e:
+        # v0-only server (e.g. server-linux.sh): it streams BEDCAST0+PCM instead of
+        # answering BC1H. Exit 3 tells the launcher to fall back to the v0 pipe
+        # (cross-family review 2026-07-20, finding: default receiver could not use
+        # the Linux server and reconnect-looped forever).
+        print("[bedcast] server is v0-only (%s) - exiting for v0 fallback" % e, file=sys.stderr)
+        sock.close()
+        return 3
     rate = struct.unpack("<I", header[8:12])[0]
     ch, bits = header[12], header[13]
     print("[bedcast] stream: %d Hz, %d ch, %d-bit; target latency %d ms"
@@ -151,6 +168,9 @@ def main() -> int:
     #          correct ONLY on sustained excursion outside a wide deadband,
     #          rate-limited, sized to return depth to B. No per-packet judgment.
     DEADBAND_US = 80_000
+    STALE_GUARD_US = 250_000   # packet older than B+this = stall-backlog relic: drop
+                               # (well above observed real-WiFi jitter; a stall then
+                               # behaves like a restart - gap, then clean re-anchor)
     SUSTAIN_PKTS = 40          # ~0.4s of consecutive out-of-band packets
     CORRECTION_GAP_S = 2.0     # min seconds between corrections
     written_us = 0.0
@@ -160,6 +180,9 @@ def main() -> int:
     primed = False
     depth_target_us = b_us     # replaced at prime time (F-v1.1-1)
     fill_blocked = False       # set when sink proves saturated (F-v1.1-2)
+    reprime_pending = False    # set when the staleness guard drains a stall backlog
+    GAP_REPRIME_S = 1.0        # a packet gap this long = stream discontinuity: re-prime
+    t_last_pkt = None
 
     def sink_write(data: bytes):
         nonlocal written_us, t_first_write
@@ -183,6 +206,33 @@ def main() -> int:
                 raise ConnectionError("insane frame length %d" % ln)
             payload = read_exactly(sock, ln)
             pkts += 1
+            if t_last_pkt is not None and time.monotonic() - t_last_pkt > GAP_REPRIME_S:
+                # silence-type gap (pause/no-render): nothing was stale, but elapsed
+                # spanned the gap - the depth estimator must re-base (Sol xhigh:
+                # naive resume inserted the stall duration as fresh silence)
+                reprime_pending = True
+            t_last_pkt = time.monotonic()
+
+            # Staleness guard (web-Fable5 review, executed finding: 3s stall ->
+            # 295-pkt burst, drops=0, +3s permanent latency, depth blind because
+            # the blocking sink write paces the loop). Also covers Sol's initial-
+            # late-packet case: stale content never reaches the sink at all.
+            lateness_us = now_us() - (ts - offset) - b_us
+            if lateness_us > STALE_GUARD_US:
+                drops += 1
+                if primed:
+                    reprime_pending = True
+                sustain = 0
+                continue
+            if reprime_pending:
+                # stall drained: re-base the depth estimator (elapsed includes the
+                # stall, written does not) and re-anchor latency = restart semantics.
+                print("[bedcast] stall drained (stale pkts dropped) - re-priming",
+                      file=sys.stderr)
+                primed = False
+                written_us = 0.0
+                t_first_write = None
+                reprime_pending = False
 
             if not primed:
                 # Server ts -> local clock is ts MINUS offset (server ~= local + offset).
@@ -233,7 +283,7 @@ def main() -> int:
                         sustain = 0
                         continue
                     pre_depth = written_us - (time.monotonic() - t_first_write) * 1e6
-                    sink_write(silence(-excursion))
+                    sink_write(silence(min(-excursion, MAX_FILL_US)))
                     post_depth = written_us - (time.monotonic() - t_first_write) * 1e6
                     if post_depth - pre_depth < -excursion * 0.5:
                         fill_blocked = True
@@ -243,11 +293,31 @@ def main() -> int:
                               % (pre_depth / 1000, post_depth / 1000), file=sys.stderr)
                     fills += 1
                 else:
-                    # sustained backlog: drop this payload (and keep dropping while high)
-                    drops += 1
+                    # sustained backlog: enter a DRAIN EPISODE - drop consecutive
+                    # payloads until depth is back inside the band, bounded to 2s of
+                    # content per episode. Rate-limit episodes, not individual drops
+                    # (cross-family review 2026-07-20: the old 1-drop-per-2s pace
+                    # needed ~200s to clear a 1s backlog).
+                    draining_us = 0.0
                     corrections += 1
                     t_last_corr = time.monotonic()
                     sustain = 0
+                    drain_target = depth_target_us + DEADBAND_US // 2
+                    while draining_us < 2_000_000:
+                        drops += 1
+                        draining_us += ln / bytes_per_us
+                        # depth falls on its own while draining (we stop writing,
+                        # the sink keeps consuming) - compare it directly; draining_us
+                        # only bounds the audible discontinuity per episode.
+                        depth_now = written_us - (time.monotonic() - t_first_write) * 1e6
+                        if depth_now <= drain_target:
+                            break
+                        hdr = read_exactly(sock, 16)
+                        seq, ts, ln = struct.unpack("<IqI", hdr)
+                        if ln > 1_048_576:
+                            raise ConnectionError("insane frame length %d" % ln)
+                        payload = read_exactly(sock, ln)
+                        pkts += 1
                     continue
                 corrections += 1
                 t_last_corr = time.monotonic()

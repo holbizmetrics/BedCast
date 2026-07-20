@@ -48,7 +48,7 @@ bedcast-server.exe --smoke-test 5 t.raw # prove capture works, no network needed
 ### Android receiver (Termux, no app install)
 
 ```bash
-pkg install git mpv netcat-openbsd
+pkg install git python mpv netcat-openbsd
 git clone https://github.com/holbizmetrics/BedCast
 BedCast/receiver/bedcast-receive.sh YOUR_PC_IP
 ```
