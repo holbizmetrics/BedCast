@@ -150,28 +150,35 @@ def main() -> int:
             payload = read_exactly(sock, ln)
             pkts += 1
 
-            err = now_us() - (ts + offset + b_us)  # + late / - early
+            # Server ts -> local clock is ts MINUS offset (server ~= local + offset).
+            # Sign error here costs 2x the clock skew: found in cross-operator review
+            # 2026-07-20 (skew -1s: every packet dropped, silent; +1s: stealth B+2s
+            # latency while stats claimed convergence). Same-machine tests can't see it.
+            err = now_us() - (ts - offset + b_us)  # + late / - early
             err_n += 1
             err_sum += err
             err_min = min(err_min, err) if err_n > 1 else err
             err_max = max(err_max, err) if err_n > 1 else err
 
-            if err > LATE_DROP_US:
-                drops += 1
-                continue
-            if err < -EARLY_FILL_US:
-                fill_us = min(-err - EARLY_FILL_US // 2, MAX_FILL_US)
-                n_bytes = int(fill_us * bytes_per_us) // 4 * 4
-                sink.write(b"\x00" * n_bytes)
-                fills += 1
-            sink.write(payload)
-
+            # Stats BEFORE drop/fill: the all-drop failure mode must stay visible
+            # (previously `continue` skipped this — a fully-dropping receiver was mute).
             if time.monotonic() >= t_stats:
                 print("[stats] pkts=%d err(ms) avg=%.1f min=%.1f max=%.1f fills=%d drops=%d"
                       % (pkts, err_sum / err_n / 1000, err_min / 1000, err_max / 1000, fills, drops),
                       file=sys.stderr)
                 err_min = err_max = err_sum = err_n = 0
                 t_stats = time.monotonic() + args.stats_secs
+
+            if err > LATE_DROP_US:
+                drops += 1
+                continue
+            if err < -EARLY_FILL_US:
+                fill_us = min(-err - EARLY_FILL_US // 2, MAX_FILL_US)
+                frame_bytes = ch * 2  # align to real frame size, not hardcoded stereo
+                n_bytes = int(fill_us * bytes_per_us) // frame_bytes * frame_bytes
+                sink.write(b"\x00" * n_bytes)
+                fills += 1
+            sink.write(payload)
     except (ConnectionError, socket.timeout) as e:
         print("[bedcast] stream ended: %s" % e, file=sys.stderr)
     finally:
