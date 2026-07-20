@@ -58,5 +58,5 @@ while true; do
     parec -d "$MONITOR" --format=s16le --rate=48000 --channels=2 --latency-msec=50
   } | $(listen_cmd) || true
   echo "[bedcast] client gone — waiting for next"
-  sleep 1
+  # sleep removed: F-linux-1 - dead-window race vs reconnecting clients
 done
