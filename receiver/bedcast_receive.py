@@ -158,6 +158,8 @@ def main() -> int:
     sustain = 0
     t_last_corr = 0.0
     primed = False
+    depth_target_us = b_us     # replaced at prime time (F-v1.1-1)
+    fill_blocked = False       # set when sink proves saturated (F-v1.1-2)
 
     def sink_write(data: bytes):
         nonlocal written_us, t_first_write
@@ -191,7 +193,11 @@ def main() -> int:
                 sink_write(silence(prime_us))
                 sink_write(payload)
                 primed = True
-                print("[bedcast] primed: transit %.1fms, prime %.1fms -> depth target %dms"
+                # F-v1.1-1 (Eve): prime targets LATENCY B, so post-prime depth is
+                # B - transit. Steering must target THAT, not b_us - else transit
+                # > deadband causes spurious fills and latency ends at B + transit.
+                depth_target_us = written_us - 0.0  # post-prime depth = the baseline
+                print("[bedcast] primed: transit %.1fms, prime %.1fms -> latency target %dms"
                       % (transit_us / 1000, prime_us / 1000, args.buffer_ms), file=sys.stderr)
                 continue
 
@@ -210,7 +216,7 @@ def main() -> int:
                 dep_min = dep_max = dep_sum = dep_n = 0
                 t_stats = time.monotonic() + args.stats_secs
 
-            excursion = depth_us - b_us
+            excursion = depth_us - depth_target_us
             if abs(excursion) > DEADBAND_US:
                 sustain += 1
             else:
@@ -218,8 +224,23 @@ def main() -> int:
 
             if sustain >= SUSTAIN_PKTS and time.monotonic() - t_last_corr > CORRECTION_GAP_S:
                 if excursion < 0:
-                    # sustained underrun risk: refill to target
+                    # F-v1.1-2 (Eve): if the sink saturates below target, depth reads
+                    # low forever and naive refills inject unbounded silence bursts
+                    # (latency grows per fill, invisible to the depth metric). Guard:
+                    # a fill must RAISE measured depth; if it didn't, the sink is
+                    # saturated - stop filling, warn once, accept the sink's ceiling.
+                    if fill_blocked:
+                        sustain = 0
+                        continue
+                    pre_depth = written_us - (time.monotonic() - t_first_write) * 1e6
                     sink_write(silence(-excursion))
+                    post_depth = written_us - (time.monotonic() - t_first_write) * 1e6
+                    if post_depth - pre_depth < -excursion * 0.5:
+                        fill_blocked = True
+                        print("[bedcast] WARN: sink saturated below target depth "
+                              "(fill did not raise depth: %.1f -> %.1fms). Steering "
+                              "disabled for fills; effective latency = sink capacity."
+                              % (pre_depth / 1000, post_depth / 1000), file=sys.stderr)
                     fills += 1
                 else:
                     # sustained backlog: drop this payload (and keep dropping while high)
