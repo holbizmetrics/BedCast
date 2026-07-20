@@ -6,10 +6,11 @@
 # Setup once (Termux):  pkg install python mpv netcat-openbsd coreutils
 #   (some Termux repos name the mpv package "mpv-x")
 #
-# Default: the PROVEN v0 pipe (nc | mpv). The v1 timestamped receiver is
-# opt-in via BEDCAST_V1=1 — its control loop was field-tested 2026-07-20 and
-# found UNSTABLE on real sinks (fill/drop oscillation -> audible chop);
-# redesign queued (buffer-depth control). Re-flip the default only after that.
+# Default: the v1.1 timestamped receiver (restart-invariant latency; passed the
+# real-device acceptance bench 2026-07-20: depth pinned ~230ms for 15+min, zero
+# corrections, 3x restart with no re-tune, 3x reconnect-compose). Set
+# BEDCAST_V0=1 to force the legacy v0 pipe (or it is the automatic fallback
+# when python is absent).
 #
 # Auto-reconnect: if the server drops (restart, WiFi blip), the receiver
 # waits for the port to come back and resumes by itself. Ctrl-C exits.
@@ -33,7 +34,7 @@ while :; do
     sleep 2
   done
 
-  if [ "${BEDCAST_V1:-0}" = "1" ] && command -v python >/dev/null && [ -f "$HERE/bedcast_receive.py" ]; then
+  if [ "${BEDCAST_V0:-0}" != "1" ] && command -v python >/dev/null && [ -f "$HERE/bedcast_receive.py" ]; then
     echo "[bedcast] v1 receiver (timestamped), target latency ${BUFFER_MS}ms — Ctrl-C to stop"
     python "$HERE/bedcast_receive.py" "$PC_IP" --port "$PORT" --buffer-ms "$BUFFER_MS" || true
   else
