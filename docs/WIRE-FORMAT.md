@@ -39,10 +39,37 @@ Interleaved signed 16-bit little-endian PCM (`S16LE`), `channels` samples per fr
 - **Trust model: your LAN.** No auth, no encryption. Anyone who can reach the port
   hears your system audio. Run it on a network you trust; don't port-forward it.
 
-## v1 (planned, will bump magic to `BEDCAST1`)
+## v1 (`BEDCAST1`, timestamped — implemented 2026-07-20)
 
-Framed packets — `seq` (uint32), `capture_ts_us` (uint64, sender clock), `n_bytes`
-(uint32), payload — plus a one-shot clock-sync handshake at connect. Receiver plays
-each packet at `capture_ts + offset`, making sync independent of buffer depth and
-self-correcting across pause/seek/dropouts. `BEDCAST0` receivers stay supported by a
-`--v0` server flag (or a v0-compat first byte negotiation, decided at v1 design time).
+Auto-negotiated at connect: a v1 receiver speaks first; a silent client gets legacy
+v0 after 700 ms. The server is multi-client — several receivers (mixed v0/v1) stream
+simultaneously.
+
+**Handshake** (before the header; all integers little-endian):
+
+| Message | Direction | Layout (12 or 20 bytes) |
+|---|---|---|
+| ping | receiver → server | `"BC1H"` + `t0_us` (i64, receiver clock) — repeat up to 8× |
+| echo | server → receiver | `"BC1R"` + `t0_us` echoed + `t_server_us` (i64) |
+| go | receiver → server | `"BC1G"` + `0` (i64) |
+
+Receiver keeps the minimum-RTT sample: `offset = t_server − (t0 + t1)/2`.
+
+**Stream:** 16-byte header (magic `BEDCAST1`, same layout as v0), then framed packets:
+
+| Field | Size | Meaning |
+|---|---|---|
+| `seq` | u32 | packet counter, per connection |
+| `capture_ts_us` | i64 | capture time of first sample, unix epoch µs, server clock |
+| `len` | u32 | payload bytes (sanity cap 1 MiB) |
+| payload | `len` | S16LE PCM |
+
+**Receiver policy** (the point of all this): playback error `e = now − (ts + offset + B)`
+where `B` is the chosen target latency (default 300 ms). `e < −20 ms` → write silence
+to converge down to `B`; `e > +120 ms` → drop the packet to catch up. Capture-to-ear
+latency therefore returns to `B` after any restart, stall, or seek — measured locally
+at ±2.4 ms across receiver restarts (2026-07-20; v0's equivalent was ±seconds).
+
+Clock drift bound: consumer crystals drift ≤50 ppm → ≤180 ms over a 2 h movie worst
+case, absorbed continuously by the fill/drop band. Multi-hour sessions may accumulate
+audible re-syncs; a periodic re-handshake is v2 material if it ever matters in practice.

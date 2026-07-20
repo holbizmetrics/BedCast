@@ -17,9 +17,10 @@ Low-latency streamers (built for calls/gaming) *must* run small buffers, so ever
 | Server (capture+send) | Windows | **TESTED** — byte-exact rate + live listening session, 2026-07-20 |
 | Server | Linux | `server-linux.sh` — **UNTESTED** (syntax-checked; PulseAudio/PipeWire monitor-source approach is standard). Reports welcome. |
 | Server | macOS | **NOT BUILT** — CoreAudio has no native loopback; needs [BlackHole](https://github.com/ExistentialAudio/BlackHole) + a pipe shim, or a Swift audio-tap (macOS 14.2+). Contributor with a Mac wanted. |
-| Receiver | Android (Termux) | **TESTED** live 2026-07-20 |
-| Receiver | Linux / macOS / Windows | any `mpv` + netcat works (see below) — untested but it's the same three commands |
-| v0 stress behavior (pause/seek/reconnect) | — | **CONFIRMED WEAK** (2026-07-20, live): receiver restart → sync off, needs re-tune; startup delayed by cache fill. Exactly the failure v1's timestamps fix. |
+| Receiver v0 (`nc \| mpv`) | Android (Termux) | **TESTED** live 2026-07-20 |
+| Receiver v1 (`bedcast_receive.py`, timestamped) | any python + mpv | **TESTED** locally 2026-07-20: latency converges to target ±2.4 ms across restarts (v0: ±seconds). Live phone test pending. |
+| Server v1 protocol (handshake, framing, multi-client, v0 fallback) | Windows | **TESTED** locally 2026-07-20 — v1 + legacy v0 clients simultaneously |
+| v0 stress behavior (pause/seek/reconnect) | — | **CONFIRMED WEAK** (2026-07-20, live): receiver restart → ~2.5 s sync shift, needs re-tune. This is the failure v1 fixes — see the v1 receiver row. |
 
 **Trust model: your LAN.** No auth, no encryption — anyone who can reach the port hears your system audio. Don't port-forward it. (See `docs/WIRE-FORMAT.md`.)
 
@@ -92,6 +93,6 @@ Wire protocol: `docs/WIRE-FORMAT.md`. **The protocol is the product** — any ca
 
 ## Roadmap
 
-- **v0 — dumb pipe** (this): capture → TCP → play. Sync via player offset. Expected to need re-tuning after pause/seek — that's the known weakness, deliberately shipped first.
-- **v1 — timestamps:** framed packets (`seq`, `capture_ts`), one-shot clock sync, receiver plays at `capture_ts + offset`. Sync becomes independent of buffer depth: survives pause, seek, dropouts. Spec sketch in `docs/WIRE-FORMAT.md`.
-- **v2 — polish:** auto-reconnect, macOS shim, maybe Opus for weak links, maybe a real Android app if Termux friction annoys.
+- **v0 — dumb pipe** (shipped): capture → TCP → play. Sync via player offset; drifts ~seconds on restart (measured). Still served to header-less clients as the legacy fallback.
+- **v1 — timestamps** (shipped 2026-07-20): framed packets + clock-sync handshake; receiver holds capture-to-ear latency at a chosen constant (±2.4 ms across restarts, measured locally). Spec: `docs/WIRE-FORMAT.md`. Multi-client server: phone + tablet + tests simultaneously.
+- **v2 — polish:** auto-reconnect, macOS shim, periodic re-handshake if multi-hour drift ever bites in practice, maybe Opus for weak links, maybe a real Android app if Termux friction annoys.
