@@ -56,3 +56,7 @@ jobs:
       - name: Linux script syntax check
         shell: bash
         run: bash -n server-linux.sh && bash -n receiver/bedcast-receive.sh
+
+      - name: Virtual-time controller scenarios (no audio hardware needed)
+        shell: bash
+        run: python tests/test_controller_virtual.py
