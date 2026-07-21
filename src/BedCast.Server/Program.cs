@@ -31,6 +31,10 @@ internal static class Program
         if (args.Contains("--help") || args.Contains("-h"))
         {
             Console.WriteLine("bedcast-server [--port N] [--device NAME_SUBSTRING] [--list-devices] [--smoke-test SECONDS OUT.raw]");
+            Console.WriteLine("               [--silent [CABLE_SUBSTRING]]  route Windows default output to a virtual");
+            Console.WriteLine("               cable (default match: \"CABLE Input\"), capture it (room stays silent),");
+            Console.WriteLine("               restore the previous default on Ctrl+C/exit.");
+            Console.WriteLine("               [--silent-smoke SECONDS]      self-restoring test of the switch+capture.");
             return 0;
         }
 
@@ -44,6 +48,52 @@ internal static class Program
         }
 
         int port = ArgValue(args, "--port") is { } p ? int.Parse(p) : DefaultPort;
+
+        // --silent / --silent-smoke: route the DEFAULT OUTPUT to a virtual cable so
+        // the room hears nothing while the stream carries everything (the origin
+        // story finished: movie on the PC screen, sound only on the phone).
+        bool silentMode = args.Contains("--silent") || ArgValue(args, "--silent-smoke") is not null;
+        string? restoreId = null;
+        string? restoreName = null;
+        if (silentMode)
+        {
+            string cableWant = ArgValue(args, "--silent") ?? "CABLE Input";
+            if (cableWant.StartsWith("--")) cableWant = "CABLE Input"; // --silent followed by another flag
+            var cable = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
+                .FirstOrDefault(d => d.FriendlyName.Contains(cableWant, StringComparison.OrdinalIgnoreCase))
+                ?? throw new ArgumentException(
+                    $"no active render device matches '{cableWant}' — install VB-Audio Cable " +
+                    "(vb-audio.com/Cable, free) or pass --silent YOUR_CABLE_NAME");
+            var prev = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            if (prev.ID != cable.ID)
+            {
+                restoreId = prev.ID;
+                restoreName = prev.FriendlyName;
+                DefaultDevice.Set(cable.ID);
+                Console.WriteLine($"[bedcast] SILENT mode: default output {prev.FriendlyName} -> {cable.FriendlyName}");
+                Console.WriteLine($"[bedcast] room is silent; restore on exit. Manual restore if killed hard: Windows Sound settings -> Output -> {prev.FriendlyName}");
+            }
+            // capture the cable regardless of --device
+            args = args.Where(a => a != "--silent").ToArray();
+            var argl = args.ToList();
+            argl.Add("--device"); argl.Add(cable.FriendlyName);
+            args = argl.ToArray();
+        }
+
+        void Restore()
+        {
+            if (restoreId is null) return;
+            try
+            {
+                DefaultDevice.Set(restoreId);
+                Console.WriteLine($"[bedcast] default output restored -> {restoreName}");
+            }
+            catch (Exception ex) { Console.WriteLine($"[bedcast] RESTORE FAILED ({ex.Message}) — restore manually: Sound settings -> Output -> {restoreName}"); }
+            restoreId = null;
+        }
+        // Graceful Ctrl+C (also Sol's shutdown finding): restore device, then exit.
+        Console.CancelKeyPress += (_, e) => { Restore(); };
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => Restore();
 
         using var device = ArgValue(args, "--device") is { } wanted
             ? enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
@@ -59,6 +109,22 @@ internal static class Program
 
         if (ArgValue(args, "--smoke-test") is { } secStr)
             return SmokeTest(capture, int.Parse(secStr), args.Last());
+
+        if (ArgValue(args, "--silent-smoke") is { } ssecStr)
+        {
+            // Self-restoring proof of the whole silent path: switch happened above,
+            // capture the cable briefly, then restore and VERIFY the restore.
+            var tmp = Path.Combine(Path.GetTempPath(), "bedcast-silent-smoke.raw");
+            int rc = SmokeTest(capture, int.Parse(ssecStr), tmp);
+            var during = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia).FriendlyName;
+            Restore();
+            var after = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia).FriendlyName;
+            bool restored = restoreName is null || after == restoreName;
+            Console.WriteLine($"[silent-smoke] default during capture: {during}");
+            Console.WriteLine($"[silent-smoke] default after restore: {after}  restore={(restored ? "OK" : "FAILED")}");
+            try { File.Delete(tmp); } catch (IOException) { }
+            return restored ? rc : 1;
+        }
 
         // Capture runs always-on; every client subscribes via the broadcast list.
         // Multiple simultaneous receivers are first-class (phone + tablet + tests).

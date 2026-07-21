@@ -67,9 +67,21 @@ nc -d YOUR_PC_IP 48100 | tail -c +17 | mpv --demuxer=rawaudio \
 
 Play your movie, nudge the player's audio offset until lips match (VLC: `j`/`k` at 50 ms per press; mpv: `Ctrl`+`+`/`Ctrl`+`-` at 100 ms). Done — that's the buffer trade paying out.
 
-## Silent-PC mode (sound *only* on the phone)
+## Silent-PC mode (sound *only* on the phone) — built in
 
-Loopback-capturing your speakers means the room hears the movie too. If you want true silence: route Windows' default output to a virtual device ([VB-Audio Cable](https://vb-audio.com/Cable/), free) and capture that: `--device "CABLE Input"`. The speakers get nothing; the phone gets everything.
+Loopback-capturing your speakers means the room hears the movie too. For true
+silence, with [VB-Audio Cable](https://vb-audio.com/Cable/) (free) installed:
+
+```
+bedcast-server.exe --silent        # or double-click bedcast-silent.cmd
+```
+
+This routes Windows' default output to the cable (room goes silent), captures the
+cable, and **restores your previous output device on Ctrl+C/exit** — verified by a
+self-restoring test (`--silent-smoke 5`). If the process is ever killed hard before
+restoring: Windows Sound settings -> Output -> pick your speakers; nothing is damaged.
+Communications-role audio (calls) deliberately keeps its device. TESTED live
+2026-07-21 (tone through cable: 100% signal captured, speakers silent, restore OK).
 
 ## Architecture
 
